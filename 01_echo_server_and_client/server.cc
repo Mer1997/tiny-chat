@@ -2,7 +2,7 @@
 #include <unistd.h>
 
 #include <cassert>
-// #include <format>
+#include <cstdlib>
 #include <iostream>
 #include <thread>
 
@@ -75,5 +75,5 @@ int main(int argc, char *argv[]) {
     ::close(client_fd);
   }
   ::close(listen_fd);
-  return 0;
+  return EXIT_SUCCESS;
 }
