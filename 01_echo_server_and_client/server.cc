@@ -56,10 +56,14 @@ int main(int argc, char *argv[]) {
               << std::endl;
 
     char buffer[BUFSIZ] = {};
-    if (auto len = ::read(client_fd, buffer, BUFSIZ); len <= 0) {
-      std::cerr << "read() failed" << std::endl;
-
-      ::exit(EXIT_FAILURE);
+    if (auto len = ::read(client_fd, buffer, BUFSIZ); len < 0) {
+      ::perror("read failed");
+    } else if (len == 0) {
+      std::cout << "server[" + std::string(server_ip) + ":" +
+                       std::to_string(server_port) + "]: client[" +
+                       std::string(client_ip) + ":" +
+                       std::to_string(client_port) + "] closed the connection"
+                << std::endl;
     } else {
       std::cout << "server[" + std::string(server_ip) + ":" +
                        std::to_string(server_port) +
@@ -70,7 +74,7 @@ int main(int argc, char *argv[]) {
       ::send(client_fd, buffer, len, 0);
 
       // simulate processing
-      std::this_thread::sleep_for(std::chrono::seconds(5));
+      std::this_thread::sleep_for(std::chrono::seconds(3));
     }
     ::close(client_fd);
   }
