@@ -1,10 +1,39 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cassert>
+#include <csignal>
 #include <iostream>
+#include <mutex>
 #include <thread>
-#include <vector>
+
+struct StatReport {
+  int client_count = 0;
+  int client_processing = 0;
+  std::chrono::milliseconds total_processing_time;
+  std::chrono::milliseconds max_processing_time;
+};
+
+std::mutex stats_mtx;
+StatReport stats;
+
+void signal_handler(int signum) {
+  if (signum == SIGUSR1) {
+    std::scoped_lock lck(stats_mtx);
+    std::cout << "================= Statistics =================" << std::endl;
+    std::cout << "Clients Served: " << stats.client_count << std::endl;
+    std::cout << "Clients Processing: " << stats.client_processing << std::endl;
+    std::cout << "Total Processing Time: "
+              << stats.total_processing_time.count() << " ms" << std::endl;
+    std::cout << "Average Processing Time: "
+              << (stats.total_processing_time / stats.client_count).count()
+              << " ms" << std::endl;
+    std::cout << "Long-tail Latency: " << stats.max_processing_time.count()
+              << " ms" << std::endl;
+    std::cout << "==============================================" << std::endl;
+  }
+}
 
 struct Socket {
   using entity_addr_t = sockaddr_in;
@@ -20,6 +49,12 @@ struct ServerSocket : public Socket {
     fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd == -1) {
       ::perror("Socket failed");
+      ::exit(EXIT_FAILURE);
+    }
+
+    const int enable = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
+      ::perror("setsockopt(SO_REUSEADDR) failed");
       ::exit(EXIT_FAILURE);
     }
   }
@@ -51,6 +86,12 @@ void listen(ServerSocket sock) {
 }
 
 int main(int argc, char *argv[]) {
+  // 设置信号处理程序
+  struct sigaction action;
+  action.sa_handler = signal_handler;
+  sigemptyset(&action.sa_mask);
+  action.sa_flags = SA_RESTART; // 使用 SA_RESTART 标志
+  sigaction(SIGUSR1, &action, nullptr);
 
   auto server_ip = "127.0.0.1";
   auto server_port = 7997;
@@ -63,10 +104,7 @@ int main(int argc, char *argv[]) {
                    std::to_string(server_port) + "]: waiting for connect"
             << std::endl;
 
-  auto threads = std::vector<std::thread>{};
-
   while (true) {
-
     auto client_sock = ClientSocket();
     auto sa_len = socklen_t(sizeof(client_sock.addr));
 
@@ -77,22 +115,31 @@ int main(int argc, char *argv[]) {
     }
 
     auto process_client = [&](ClientSocket &&client) {
+      {
+        std::scoped_lock lck(stats_mtx);
+        stats.client_processing++;
+        // std::cout << "process_client: " << stats.client_processing <<
+        // std::endl;
+      }
+
+      auto start = std::chrono::high_resolution_clock::now();
+
       char client_ip[INET_ADDRSTRLEN] = {};
       inet_ntop(AF_INET, &client.addr.sin_addr, client_ip, INET_ADDRSTRLEN);
       auto client_port = ntohs(client.addr.sin_port);
 
-      std::cout << "server[" + std::string(server_ip) + ":" +
-                       std::to_string(server_port) +
-                       "]: connection established with client[" +
-                       std::string(client_ip) + ":" +
-                       std::to_string(client_port) + "]("
-                << client.fd << ")" << std::endl;
+      // std::cout << "server[" + std::string(server_ip) + ":" +
+      //                  std::to_string(server_port) +
+      //                  "]: connection established with client[" +
+      //                  std::string(client_ip) + ":" +
+      //                  std::to_string(client_port) + "]("
+      //           << client.fd << ")" << std::endl;
 
       while (true) {
         char buffer[BUFSIZ] = {};
         if (auto len = ::read(client.fd, buffer, BUFSIZ); len < 0) {
           ::perror("Error reading");
-          ::exit(EXIT_FAILURE);
+          break;
         } else if (len == 0) {
           std::cout << "server[" + std::string(server_ip) + ":" +
                            std::to_string(server_port) + "]: client[" +
@@ -109,19 +156,35 @@ int main(int argc, char *argv[]) {
                     << std::string(buffer) << std::endl;
 
           ::send(client.fd, buffer, len, 0);
-
-          // simulate processing
-          std::this_thread::sleep_for(std::chrono::seconds(5));
         };
       }
+
+      auto end = std::chrono::high_resolution_clock::now();
+      auto spent =
+          std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+      // std::cout << "server[" + std::string(server_ip) + ":" +
+      //                  std::to_string(server_port) + "]: spent "
+      //           << spent.count()
+      //           << " ms for client[" + std::string(client_ip) + ":" +
+      //                  std::to_string(client_port) + "]"
+      //           << std::endl;
+
+      {
+        std::scoped_lock lck(stats_mtx);
+        stats.client_count++;
+        stats.client_processing--;
+        stats.total_processing_time += spent;
+        stats.max_processing_time = std::max(stats.max_processing_time, spent);
+      }
+
+      // simulate processing
+      std::this_thread::sleep_for(std::chrono::seconds(3));
 
       ::close(client.fd);
     };
 
-    threads.emplace_back(process_client, std::move(client_sock));
+    std::thread(process_client, std::move(client_sock)).detach();
   }
-
-  // maybe join here
 
   ::close(server_sock.fd);
   return 0;
